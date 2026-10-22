@@ -1,0 +1,19 @@
+# Data & Cache
+data/
+cache/
+*.tif
+*.gpkg
+*.pth
+*.kml
+
+# Environment
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# OS & IDE
+.DS_Store
+.vscode/
+.idea/
