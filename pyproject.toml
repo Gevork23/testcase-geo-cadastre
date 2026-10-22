@@ -1,0 +1,48 @@
+[project]
+name = "cadastre-check"
+version = "0.1.0"
+description = "CadastreCheck — выявление несоответствий застройки данным кадастра"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Геоданные и растры
+    "geopandas>=0.14.0",
+    "shapely>=2.0.0",
+    "rasterio>=1.3.0",
+    "pyproj>=3.6.0",
+    "fiona>=1.9.0",
+    
+    # Работа с НСПД и сетью
+    "pynspd>=1.0.0",
+    "requests>=2.31.0",
+    "httpx>=0.25.0",
+    "tenacity>=8.2.0",
+    
+    # Конфигурация и валидация
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    
+    # ML и обработка изображений (на будущее для T14-T15)
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.8.0",
+    "pillow>=10.0.0",
+    "tqdm>=4.66.0",
+    
+    # Интерфейс (T27)
+    "streamlit>=1.30.0",
+    
+    # Тестирование
+    "pytest>=8.0.0",
+]
+
+[tool.uv]
+
+[[tool.uv.index]]
+name = "gisidx"
+url = "https://gisidx.github.io/gwi"
+explicit = true
+
+[tool.uv.sources]
+fiona = { index = "gisidx" }
