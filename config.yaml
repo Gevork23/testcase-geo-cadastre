@@ -1,0 +1,63 @@
+# ==========================================
+# CadastreCheck Configuration (T5)
+# ==========================================
+
+# 1. Пути к данным (относительно корня проекта)
+paths:
+  aoi_geojson: "aoi.geojson"
+  cache_dir: "data/cache/nspd"
+  imagery_dir: "data/imagery"
+  esri_mosaic_tif: "data/imagery/aoi_esri_utm37n.tif"
+  osm_gpkg: "data/osm/buildings_aoi.gpkg"
+  output_gpkg: "discrepancies.gpkg"
+  log_dir: "logs"
+
+# 2. Настройки выгрузки ESRI и OSM (T10, T13)
+imagery:
+  zoom_level: 18       # 18 или 19
+  target_crs: "EPSG:32637" # UTM zone 37N для метров
+
+osm:
+  overpass_url: "https://overpass-api.de/api/interpreter"
+
+# 3. Настройки НСПД (T6-T8)
+nspd:
+  rate_limit_rps: 1.5  # Запросов в секунду (безопасно)
+  timeout_sec: 30
+  max_retries: 3
+  retry_backoff_sec: 2.0
+  use_cache: true
+  cache_ttl_days: 7
+
+# 4. Параметры модели сегментации (T14-T15)
+model:
+  name: "unet"         # Архитектура (U-Net, DeepLabV3+ или Segformer)
+  weights_path: "weights/best_model.pth"
+  tile_size: 512
+  overlap: 0.25        # 25% перекрытие тайлов
+  batch_size: 4
+
+# 5. Пороги векторизации и детекции (T3, T16-T17)
+detection:
+  min_area_m2: 10.0    # Фильтр мелких объектов
+  score_threshold: 0.5 # Минимальный score модели для принятия объекта
+
+# 6. Пороги сопоставления и классификации (T18-T24)
+matching:
+  # Сдвиги и буферы
+  image_shift_dx: 0.0  # Будет уточнено на шаге T18
+  image_shift_dy: 0.0
+  buffer_m: 2.0        # Буфер допуска для пересечений (1-3 метра)
+
+  # Пороги для типов несоответствий
+  iou_threshold_match: 0.5    # IoU для матчинга (TP)
+  iou_threshold_missing: 0.1  # Низкий IoU для поиска детекции в MISSING
+  
+  out_of_parcel_ratio: 0.20   # > 20% площади вне участка
+  area_mismatch_ratio: 0.10   # > 10% расхождения площадей
+  
+# 7. Опции запуска
+pipeline:
+  use_cache: true
+  skip_imagery_download: false
+  skip_nspd_download: false
