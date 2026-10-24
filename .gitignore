@@ -5,6 +5,7 @@ cache/
 *.gpkg
 *.pth
 *.kml
+logs/
 
 # Environment
 .env
@@ -17,3 +18,4 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
