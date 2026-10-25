@@ -22,12 +22,18 @@ osm:
 
 # 3. Настройки НСПД (T6-T8)
 nspd:
-  rate_limit_rps: 1.5  # Запросов в секунду (безопасно)
-  timeout_sec: 30
-  max_retries: 3
-  retry_backoff_sec: 2.0
-  use_cache: true
+  cache_dir: data/cache/nspd
   cache_ttl_days: 7
+  max_retries: 3
+  retry_backoff_min_sec: 2.0
+  rate_limit_rps: 1.5
+  layers:          # алиасы, адаптер сам разворачивает в русские title
+    - land_record
+    - building
+    - structure
+    - unfinished
+  fallback_grid_step_m: 100
+  fallback_max_points: 500 
 
 # 4. Параметры модели сегментации (T14-T15)
 model:
