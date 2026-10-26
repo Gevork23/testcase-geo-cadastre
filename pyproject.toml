@@ -66,3 +66,6 @@ exclude_lines = [
 dev = [
     "pytest-cov>=7.1.0",
 ]
+
+[tool.pyright]
+reportMissingModuleSource = "none"
