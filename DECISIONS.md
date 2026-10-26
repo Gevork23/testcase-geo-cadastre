@@ -1,8 +1,8 @@
 # DECISIONS
 
 Журнал решений по тестовому заданию CadastreCheck. Фиксирует выбор AOI,
-окружение, конфигурацию, доступ к НСПД и ограничения. На текущем этапе
-закрыты шаги T1–T6; дальнейшие шаги (T7+) перечислены в roadmap в конце.
+окружение, конфигурацию, доступ к НСПД, ограничения и кэш. На текущем
+этапе закрыты шаги T1–T8; дальнейшие шаги (T9+) — в roadmap в конце.
 
 ---
 
@@ -70,6 +70,11 @@
 - `paths.aoi_geojson`, `paths.cache_dir`, `paths.log_dir`;
 - `nspd.timeout_sec`, `nspd.max_retries`, `nspd.rate_limit_rps`,
   `nspd.use_cache`, `nspd.cache_ttl_days`.
+
+> **Актуально на T8:** полей `nspd.timeout_sec` и `nspd.use_cache` в
+> `config.yaml` больше нет (исторический артефакт T5); управление кэшем
+> вынесено в CLI-флаги (`CachePolicy`), см. §T8 «Конфиг после T8».
+> `pipeline.use_cache` — задел на T25.
 
 Поля `nspd.retry_backoff_sec` определены в конфиге, но на T6 не применяются
 (`pynspd` не даёт прямого контроля над backoff — реализуется в T7 через
@@ -368,17 +373,237 @@ uv run python scripts/probe_nspd.py --config config.yaml
 uv run pytest --cov=src --cov-report=term-missing
 → src/ 90%
 
-text
 
-### Что на T8
+### Что было запланировано на T8 (закрыто)
 
 Из ТЗ и HANDOFF T8:
-- `--refresh-cache` / `--no-cache` CLI-флаги (TTL и schema-version уже
-  есть, ручной инвалидации нет).
-- `cache_hits / misses / stale` в сводке пайплайна — чтобы при падении
-  API было явно видно «работаем на кэше».
-- «API упал, кэш промахнулся» — сейчас `[]` без отдельного ERROR (на
-  error-пути), в T8 нужен явный лог и счётчик.
-- Опционально: унификация кэша `probe_nspd.py` + `nspd_client.py`.
-- Опционально: `get_oks_by_land_plot` для ОКС без контура в площадном
-  fallback (если подтвердится, что метод работает — сейчас не проверялся).
+- ✅ `--refresh-cache` / `--no-cache` CLI-флаги — реализованы в T8.1.
+- ✅ `cache_hits / misses / stale` в сводке пайплайна — реализованы в T8.1
+  (`RobustCadastreClient.stats` + `cache_summary()`).
+- ✅ «API упал, кэш промахнулся» — реализовано в T8.1
+  (`cache_miss_on_network_error`, `stats["errors"]`).
+- ❌ Опционально: унификация кэша `probe_nspd.py` + `nspd_client.py` —
+  **отложено**: HANDOFF запрещает переписывать `probe_nspd.py`
+  (T6-артефакт); namespace-разделение сохранено, см. §T8 «Два кэша».
+- ❌ Опционально: `get_oks_by_land_plot` для ОКС без контура — **отложено
+  на T9** (`oks_effective_geometry`), см. §T8 «Что на T9».
+---
+
+## T8: Кэш НСПД на диск
+
+### Артефакты
+
+- `src/nspd_client.py` — `CachePolicy` (enum: `USE` / `NO` / `REFRESH`),
+  `RobustCadastreClient.stats` (`{hits, misses, stale, writes, errors}`),
+  `cache_summary()` (снапшот для лога), `_cached_get` / `_cached_put`
+  (единая точка политики), `cache_miss_on_network_error` (ERROR-лог при
+  промахе + сетевой ошибке).
+- CLI `python -m src.nspd_client --config ... --test` — флаги
+  `--use-cache` (default) / `--no-cache` / `--refresh-cache`
+  (`argparse.add_mutually_exclusive_group`).
+- `scripts/dump_nspd_aoi.py` — демо-пайплайн T8: читает `config.yaml` +
+  `aoi.geojson`, проходит по `nspd.layers` (4 слоя) через
+  `RobustCadastreClient.get_features`, пишет
+  `data/cache/nspd_dump.geojson` (в `.gitignore` через `data/`).
+- `tests/test_nspd_client.py` — 4 новых теста
+  (`cache_policy_no_cache`, `cache_policy_refresh`, `cache_stats_hits_misses`,
+  `cache_miss_with_network_error_logs_explicit`). Итого **50 passed,
+  3 skipped, 90% cov**.
+
+### Почему `CachePolicy` (enum), а не три boolean
+
+`CachePolicy(str, Enum)` с тремя значениями — `USE`, `NO`, `REFRESH`:
+
+- **Один источник правды:** `argparse`, `RobustCadastreClient` и будущий
+  пайплайн T25–T26 принимают одно значение, а не три флага с неочевидной
+  семантикой («`--no-cache --use-cache` — что главнее?»).
+- **`add_mutually_exclusive_group`** автоматически ловит комбинации:
+  `--use-cache --no-cache` → ошибка парсинга, а не «последний победил».
+- **`str, Enum`** — значение само сериализуется в лог/JSON без `str()`.
+- **Переиспользование в Streamlit T27:** один `st.radio` даёт три опции
+  без маппинга.
+
+Три boolean отклонены: `use_cache=False, refresh=True` семантически
+противоречиво, а «забыть передать» хотя бы один — реальный риск.
+
+### `cache_ttl_days` vs `--refresh-cache`: независимые механизмы
+
+| Механизм | Что значит | Где срабатывает | Счётчик |
+|---|---|---|---|
+| `nspd.cache_ttl_days` (7) | «устарел по времени» | `FileCache.get` → `None` | `misses += 1` |
+| `--refresh-cache` | «устарел по желанию» | `_cached_get` не читает (`REFRESH`); `_cached_put` пишет | `writes += 1`; `misses` не растёт |
+| schema version (`_v=2`) | «устарел по контракту» | `_payload_to_obj` → `None` | `stale += 1` |
+
+Все три ведут к refetch, но семантически разные:
+
+- **TTL** — «кэш устарел по времени, но payload валиден»;
+- **refresh** — «кэш не устарел, но пользователь просит свежее»;
+- **stale** — «кэш есть, но не подходит текущей версии кода».
+
+`--refresh-cache` **не** сбрасывает TTL и не удаляет файлы: старые
+payload'ы перезаписываются поверх (`os.replace` в `FileCache.put`),
+счётчик `writes` фиксирует перезапись.
+
+### `--no-cache`: не читаем, не пишем
+
+При `CachePolicy.NO` `_cached_get` не вызывает `self.cache.get` (не
+инкрементит `misses`), `_cached_put` не вызывает `self.cache.put` (не
+инкрементит `writes`). Старый кэш на диске не затрагивается.
+
+Почему не «читать, но не писать» и не «писать поверх»:
+
+1. **CI / отладка:** `--no-cache` — это «покажи, что реально отдаёт API
+   прямо сейчас», без риска, что старый кэш замаскирует смену схемы НСПД.
+2. **Безопасность:** прогон под `--no-cache` не портит кэш, собранный
+   длительным прогоном под `--use-cache`.
+3. **Симметрия:** если не читаем, то и не пишем — иначе непонятно,
+   откуда в следующий раз возьмётся `hit`.
+
+Демо подтверждает: `--no-cache` → `{hits:0, misses:0, stale:0, writes:0,
+errors:0}`, но HTTP-запросы идут (см. таблицу в «Проверки после T8»).
+
+### Формат `cache_stats`
+
+```python
+{
+    "hits":    int,  # cache.get() вернул валидный payload → использован
+    "misses":  int,  # cache.get() → None (нет / expired по TTL)
+    "stale":   int,  # cache.get() → payload, _payload_to_obj отбросил
+    "writes":  int,  # cache.put() успешно
+    "errors":  int,  # exception на error-пути (после max_retries)
+}
+```
+
+Два канала:
+
+- **CLI** (`_main_test`, `dump_nspd_aoi.py`):
+  `log.info("cache_summary %s", summary)` — читаемо в stderr.
+- **Пайплайн / Streamlit T27:** `client.cache_summary()` возвращает `dict`
+  — structured, готов к JSON, не привязан к `logging`.
+
+`extra={"msg": ...}` не используется — `LogRecord` резервирует `msg`
+(см. §T7).
+
+### `running_on_cache`: сигнал ревьюеру и для Streamlit T27
+
+Если в конце прогона `hits > 0`, `_main_test` / `dump_nspd_aoi.py`
+логируют:
+```
+running_on_cache hits=N misses=M
+```
+
+Три сценария:
+
+| Сценарий | `hits` / `misses` | Вывод |
+|---|---|---|
+| 1-й прогон, кэш пуст | `hits=0, misses=N` | «работаем вживую» |
+| 2-й прогон, кэш тёплый | `hits=N, misses=0` | «на кэше, 0 HTTP» |
+| API упал, кэш промахнулся | `hits=M, misses=N`, `errors>0` | «частично на кэше, API частично недоступен» |
+
+В T27 Streamlit `hits > 0` → баннер «данные из кэша от <дата>» (дата из
+`created_at` самого старого использованного файла).
+
+### Два кэша: probe vs client (не объединены)
+
+`probe_nspd.py` (T6) и `RobustCadastreClient` (T7) имеют разные схемы
+ключей и payload'ов, namespace-разделены (см. §T7 «Два кэша»):
+
+- probe: `sha1(cad_num)`, payload `{ok, kind, area_m2, has_contour, ...}`;
+- client: `sha1("parcel|" + cad_num)` /
+  `sha1("area|" + layer + "|" + WKB)`, payload с `_v=2`.
+
+**Не объединены** в T8 — HANDOFF запрещает переписывать `probe_nspd.py`.
+T6-контракт цел: 5/5 OK на прогоне 2026-10-26 (1 валидный 404 — `not_found`).
+
+Унификация — кандидат на T25/T27, когда появится единая точка входа.
+
+### `fiona` через pypi: chore `f5f9c6e`
+
+При первом `uv sync` на Linux (AltLinux p11) кастомный индекс
+`gisidx.github.io/gwi` не отдал колесо `fiona==1.10.1` для
+`manylinux_2_38_x86_64` (только `win32` / `win_amd64` / `win_arm64`).
+Собрать из sdist не удалось (`libgdal-devel` в p11 нет).
+
+Решение: точечное перенаправление `fiona` на PyPI через
+`[[tool.uv.index]] name="pypi" explicit=true` +
+`[tool.uv.sources] fiona = { index = "pypi" }`.
+
+- **`explicit = true`** — индекс `pypi` участвует в резолве **только**
+  для `fiona`, остальные пакеты идут через дефолтный индекс uv.
+- **На Windows** поведение не меняется: PyPI отдаёт `win_amd64`-колесо
+  `fiona==1.10.1`.
+- `uv.lock` пересчитан (`f5f9c6e`).
+
+`gisidx` больше не используется. Если в T9+ понадобится — вернём
+отдельным коммитом.
+
+### Конфиг после T8
+
+Актуальный набор полей, которые **реально используются** T7–T8:
+
+- `paths.aoi_geojson` — вход `dump_nspd_aoi.py`;
+- `paths.cache_dir` — только `probe_nspd.py` (T6-артефакт);
+- `nspd.cache_dir` — канон для `RobustCadastreClient` (включая
+  `dump_nspd_aoi.py` и `_main_test`); **дублирует** `paths.cache_dir`,
+  но namespace у них разный (см. §T7);
+- `nspd.cache_ttl_days` — TTL `FileCache`;
+- `nspd.max_retries`, `nspd.retry_backoff_min_sec`, `nspd.rate_limit_rps`,
+  `nspd.retry_backoff_sec` (default 1.0 в коде, если не задан) —
+  параметры `RobustCadastreClient`;
+- `nspd.layers` — 4 алиаса (`land_record`, `building`, `structure`,
+  `unfinished`); `PynspdAdapter` разворачивает в русские title,
+  `dump_nspd_aoi.py` использует как порядок обхода;
+- `nspd.fallback_grid_step_m`, `nspd.fallback_max_points` — параметры
+  `NspdRequestAdapter` (в T8 `fallback=None`, поля нужны для T9+).
+
+**Не используются на T7–T8** (артефакты §T5): `nspd.timeout_sec`,
+`nspd.use_cache` — этих полей в `config.yaml` больше нет; управление
+кэшем вынесено в CLI-флаги.
+
+`pipeline.use_cache` (line 67) — задел на T25; `dump_nspd_aoi.py` и
+`_main_test` его **не читают**, берут флаги из CLI.
+
+Логи: `probe_nspd.py` пишет в `logs/probe_nspd.log` (T6); CLI-скрипты
+T7–T8 логируют в stderr через `logging.basicConfig(level=INFO)`.
+Унификация — кандидат на T25.
+
+### Проверки после T8
+```bash
+uv run pytest tests/test_nspd_client.py -v
+# → 50 passed, 3 skipped
+
+uv run pytest --cov=src --cov-report=term-missing
+# → src/ 90% (nspd_client 90, nspd_cache 90, nspd_models 91)
+
+uv run python -m src.nspd_client --config config.yaml --test
+# → cache_hit / cache_miss, has_contour=False, cache_summary в логе
+
+uv run python scripts/probe_nspd.py --config config.yaml
+# → 5/5 OK (1 FAIL 404 — валидный not_found); T6-контракт цел
+```
+
+Демо `dump_nspd_aoi.py` (2026-10-26, 4 слоя, **4663 фичи**):
+
+| Прогон | `hits` | `misses` | `writes` | `errors` | `running_on_cache` | HTTP |
+|---|---|---|---|---|---|---|
+| 1. default, кэш пуст | 0 | 4 | 4 | 0 | нет | 4 |
+| 2. default, кэш тёплый | 4 | 0 | 0 | 0 | **есть** | **0** |
+| 3. `--refresh-cache` | 0 | 0 | 4 | 0 | нет | 4 |
+| 4. `--no-cache` | 0 | 0 | 0 | 0 | нет | 4 |
+
+`aoi_loaded area_km2=3.812` (геодезическая по WGS84, `pyproj.Geod`) —
+совпадает с §T1–T2 (3.81 км²).
+
+### Что на T9
+
+Из HANDOFF и §T7:
+
+- `oks_effective_geometry(oks, parcels) -> BaseGeometry` — ОКС без
+  контура (`Point` в `attrs["attachment_point_wkt"]`) связывается
+  с участком и получает `inherited_from_parcel=True`.
+- `NspdRequestAdapter.get_features` ОКС без контура **не находит** —
+  документированное ограничение §T7; клиент не обязан их находить,
+  T9 восстанавливает связь через `oks_effective_geometry`.
+- `61:44:0060958:173` — реальный тест-кейс (`no_coords=True`,
+  площадь 152 м²): `has_contour=False`, `Point` в WKT. Не должен
+  порождать ложных UNREGISTERED / OUT_OF_PARCEL.
