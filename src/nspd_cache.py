@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import logging
 import os
@@ -20,9 +21,25 @@ def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+_WINDOWS_FORBIDDEN = re.compile(r'[:/\\*?"<>|]')
+
+
+def _sanitize(s: str) -> str:
+    """Заменяет недопустимые в Windows символы в имени файла.
+
+    ТЗ требует `{cad_num}.json`, но cad_num содержит ':' (например,
+    `61:44:0060958:173`), а ':' на Windows недопустим в путях — заменяем на '_'.
+    """
+    return _WINDOWS_FORBIDDEN.sub("_", s)
+
+
 def cache_key_point(kind: str, query: str) -> str:
-    """kind ∈ {parcel, oks}, query = cad_num."""
-    return _sha1(f"{kind}|{query}")
+    """kind ∈ {parcel, oks}, query = cad_num.
+
+    Читаемый ключ вида `parcel_61_44_0060958_173` — удобно смотреть
+    `ls data/cache/nspd/`, а не 40-символьные хэши.
+    """
+    return f"{kind}_{_sanitize(query)}"
 
 
 def cache_key_area(layer: str, aoi: BaseGeometry) -> str:
@@ -30,7 +47,7 @@ def cache_key_area(layer: str, aoi: BaseGeometry) -> str:
     wkb_hex = shapely.to_wkb(
         shapely.set_precision(aoi, grid_size=1e-6), hex=True
     )
-    return _sha1(f"area|{layer}|{wkb_hex}")
+    return f"area_{_sanitize(layer)}_{_sha1(wkb_hex)}"
 
 
 class FileCache:

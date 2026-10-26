@@ -116,7 +116,10 @@ def test_cache_key_point_deterministic():
     k3 = cache_key_point("oks", "61:44:0060958:173")
     assert k1 == k2
     assert k1 != k3
-    assert len(k1) == 40
+    # Человекочитаемый ключ: kind_<sanitized_cad_num>. ':' недопустим на Windows.
+    assert k1 == "parcel_61_44_0060958_173"
+    assert ":" not in k1
+    assert k3 == "oks_61_44_0060958_173"
 
 
 def test_cache_key_area_precision_insensitive():

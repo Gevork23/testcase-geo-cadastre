@@ -871,6 +871,14 @@ class RobustCadastreClient:
 async def _main_test(  # pragma: no cover
     cfg_path: str, cache_policy: CachePolicy = CachePolicy.USE
 ) -> None:
+    import sys
+    # Windows: stdout по умолчанию cp1251, а в логах есть "->".
+    # Принудительно utf-8, чтобы print не падал с UnicodeEncodeError.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     import yaml
 
     cfg = yaml.safe_load(Path(cfg_path).read_text("utf-8"))
@@ -897,7 +905,7 @@ async def _main_test(  # pragma: no cover
         )
         for cad in ("61:44:0060958:173", "61:44:0000000:0"):
             obj = await client.fetch_parcel(cad)
-            print(cad, "→", obj.model_dump(exclude={"geometry"}) if obj else None)
+            print(cad, "->", obj.model_dump(exclude={"geometry"}) if obj else None)
         summary = client.cache_summary()
         log.info("cache_summary %s", summary)
         if client.stats["hits"] > 0:
