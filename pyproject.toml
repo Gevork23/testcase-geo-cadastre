@@ -37,12 +37,12 @@ dependencies = [
 [tool.uv]
 
 [[tool.uv.index]]
-name = "gisidx"
-url = "https://gisidx.github.io/gwi"
+name = "pypi"
+url = "https://pypi.org/simple"
 explicit = true
 
 [tool.uv.sources]
-fiona = { index = "gisidx" }
+fiona = { index = "pypi" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
