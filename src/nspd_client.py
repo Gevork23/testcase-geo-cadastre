@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import uuid
+from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -626,6 +627,19 @@ def _payload_to_obj(p: dict[str, Any]) -> CadastralObject | None:
 
 
 # --- 7. Оркестратор -----------------------------------------------------
+class CachePolicy(str, Enum):
+    """Политика работы с файловым кэшем НСПД.
+
+    USE     — читать кэш, писать в кэш (default);
+    NO      — не читать, не писать (CI, отладка «что реально отдаёт API»);
+    REFRESH — не читать, но писать поверх (инвалидация без rm).
+    """
+
+    USE = "use"
+    NO = "no"
+    REFRESH = "refresh"
+
+
 class RobustCadastreClient:
     def __init__(
         self,
@@ -637,6 +651,7 @@ class RobustCadastreClient:
         retry_backoff_sec: float = 1.0,
         retry_backoff_min_sec: float = 2.0,
         rate_limit_rps: float = 1.5,
+        cache_policy: CachePolicy = CachePolicy.USE,
     ) -> None:
         self.primary = primary
         self.fallback = fallback
@@ -645,6 +660,35 @@ class RobustCadastreClient:
         self.backoff = retry_backoff_sec
         self.backoff_min = retry_backoff_min_sec
         self._limiter = AsyncLimiter(rate_limit_rps, 1)  # общий на процесс
+        self.cache_policy = cache_policy
+        self.stats: dict[str, int] = {
+            "hits": 0,
+            "misses": 0,
+            "stale": 0,
+            "writes": 0,
+            "errors": 0,
+        }
+
+    # --- работа с кэшем под политикой ----------------------------------
+    def _cached_get(self, key: str) -> Any | None:
+        """Читает кэш только при USE; NO/REFRESH — осознанный обход."""
+        if self.cache_policy is not CachePolicy.USE:
+            return None
+        payload = self.cache.get(key)
+        if payload is None:
+            self.stats["misses"] += 1
+        return payload
+
+    def _cached_put(self, key: str, payload: Any) -> None:
+        """Пишет кэш при USE и REFRESH; NO — не пишет (безопасно для CI)."""
+        if self.cache_policy is CachePolicy.NO:
+            return
+        self.cache.put(key, payload)
+        self.stats["writes"] += 1
+
+    def cache_summary(self) -> dict[str, int]:
+        """Снапшот счётчиков для лога в конце пайплайна."""
+        return dict(self.stats)
 
     # --- низкоуровневые хелперы ----------------------------------------
     async def _rate_limited(self, fn: Callable[[], Awaitable[Any]]) -> Any:
@@ -732,34 +776,41 @@ class RobustCadastreClient:
     # --- публичный контракт CadastreLoader ----------------------------
     async def fetch_parcel(self, cad_num: str) -> CadastralObject | None:
         key = cache_key_point("parcel", cad_num)
-        cached = self.cache.get(key)
+        cached = self._cached_get(key)
         if cached is not None:
             if cached.get("ok") is False:
+                self.stats["hits"] += 1
                 log.info("cache_hit", extra={"op": "parcel", "cad_num": cad_num})
                 return None
             obj = _payload_to_obj(cached["obj"])
             if obj is not None:
+                self.stats["hits"] += 1
                 log.info("cache_hit", extra={"op": "parcel", "cad_num": cad_num})
                 return obj
+            self.stats["stale"] += 1
             log.warning("cache_stale_schema",
                         extra={"op": "parcel", "cad_num": cad_num})
 
+        cache_missed = (
+            cached is None and self.cache_policy is CachePolicy.USE
+        )
         try:
             obj = await self._try_cascade("parcel", "fetch_parcel", cad_num)
         except NotFound:
             obj = None
         except Exception as e:
-            log.exception(
-                "parcel_failed_no_cache",
-                extra={"cad_num": cad_num, "err": type(e).__name__,
-                       "detail": str(e)[:200]},
-            )
+            self.stats["errors"] += 1
+            extra = {"cad_num": cad_num, "err": type(e).__name__,
+                     "detail": str(e)[:200]}
+            if cache_missed:
+                log.error("cache_miss_on_network_error", extra=extra)
+            log.exception("parcel_failed_no_cache", extra=extra)
             return None
 
         if obj is None:
-            self.cache.put(key, {"ok": False, "error": "not_found"})
+            self._cached_put(key, {"ok": False, "error": "not_found"})
             return None
-        self.cache.put(key, {"ok": True, "obj": _obj_to_payload(obj)})
+        self._cached_put(key, {"ok": True, "obj": _obj_to_payload(obj)})
         return obj
 
     async def get_features(
@@ -767,26 +818,32 @@ class RobustCadastreClient:
     ) -> list[CadastralObject]:
         ln = layer or "all"
         key = cache_key_area(ln, aoi)
-        cached = self.cache.get(key)
+        cached = self._cached_get(key)
         if cached is not None:
             objs = [_payload_to_obj(o) for o in cached]
             if all(o is not None for o in objs):
+                self.stats["hits"] += 1
                 log.info("cache_hit", extra={"op": "area", "layer": ln})
                 return objs  # type: ignore[return-value]
+            self.stats["stale"] += 1
             log.warning("cache_stale_schema", extra={"op": "area", "layer": ln})
 
+        cache_missed = (
+            cached is None and self.cache_policy is CachePolicy.USE
+        )
         try:
             objects = await self._try_cascade("area", "get_features", aoi, layer=layer)
         except Exception as e:
-            log.exception(
-                "area_failed_no_cache",
-                extra={"layer": ln, "err": type(e).__name__,
-                       "detail": str(e)[:200]},
-            )
+            self.stats["errors"] += 1
+            extra = {"layer": ln, "err": type(e).__name__,
+                     "detail": str(e)[:200]}
+            if cache_missed:
+                log.error("cache_miss_on_network_error", extra=extra)
+            log.exception("area_failed_no_cache", extra=extra)
             return []
 
         objects = objects or []
-        self.cache.put(key, [_obj_to_payload(o) for o in objects])
+        self._cached_put(key, [_obj_to_payload(o) for o in objects])
         return objects
 
     async def fetch_oks_in_bbox(
@@ -811,7 +868,9 @@ class RobustCadastreClient:
 
 
 # --- 8. CLI для быстрой проверки ----------------------------------------
-async def _main_test(cfg_path: str) -> None:  # pragma: no cover
+async def _main_test(  # pragma: no cover
+    cfg_path: str, cache_policy: CachePolicy = CachePolicy.USE
+) -> None:
     import yaml
 
     cfg = yaml.safe_load(Path(cfg_path).read_text("utf-8"))
@@ -834,10 +893,18 @@ async def _main_test(cfg_path: str) -> None:  # pragma: no cover
             retry_backoff_sec=float(n.get("retry_backoff_sec", 1.0)),
             retry_backoff_min_sec=float(n.get("retry_backoff_min_sec", 2.0)),
             rate_limit_rps=float(n.get("rate_limit_rps", 1.5)),
+            cache_policy=cache_policy,
         )
         for cad in ("61:44:0060958:173", "61:44:0000000:0"):
             obj = await client.fetch_parcel(cad)
             print(cad, "→", obj.model_dump(exclude={"geometry"}) if obj else None)
+        summary = client.cache_summary()
+        log.info("cache_summary %s", summary)
+        if client.stats["hits"] > 0:
+            log.info(
+                "running_on_cache hits=%d misses=%d",
+                client.stats["hits"], client.stats["misses"],
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -847,6 +914,14 @@ if __name__ == "__main__":  # pragma: no cover
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--test", action="store_true")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--use-cache", dest="cache_policy",
+                     action="store_const", const=CachePolicy.USE)
+    grp.add_argument("--no-cache", dest="cache_policy",
+                     action="store_const", const=CachePolicy.NO)
+    grp.add_argument("--refresh-cache", dest="cache_policy",
+                     action="store_const", const=CachePolicy.REFRESH)
+    ap.set_defaults(cache_policy=CachePolicy.USE)
     args = ap.parse_args()
     if args.test:
-        asyncio.run(_main_test(args.config))
+        asyncio.run(_main_test(args.config, args.cache_policy))

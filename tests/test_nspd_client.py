@@ -17,6 +17,7 @@ from shapely.geometry import Point, Polygon
 from src.nspd_cache import FileCache, cache_key_area, cache_key_point
 from src.nspd_client import (
     _CACHE_SCHEMA,
+    CachePolicy,
     NspdRequestAdapter,
     PynspdAdapter,
     RobustCadastreClient,
@@ -1060,3 +1061,137 @@ def test_live_nspd_request_area_small():
             print(f"  {o.cad_num} {o.object_type} contour={o.has_contour}")
 
     asyncio.run(_run())
+
+# ============================================================
+# 12. T8.1: CachePolicy + session stats
+# ============================================================
+def _stub_feat_polygon(cad_num: str, category: int = 36369):
+    return _StubFeat(
+        geometry=_StubGeom(Polygon([(0, 0), (1, 0), (1, 1), (0, 0)])),
+        properties=_StubProps(_StubOptions(cad_num=cad_num), category=category),
+    )
+
+
+def test_cache_policy_no_cache_ignores_cache(tmp_path):
+    async def _run():
+        obj = CadastralObject(
+            cad_num="a:b:c:1", object_type="parcel", geometry=_poly(),
+            area_cad_m2=100.0, has_contour=True, source="pynspd",
+        )
+        cache = FileCache(tmp_path)
+        key = cache_key_point("parcel", "a:b:c:1")
+        cache.put(key, {"ok": True, "obj": _obj_to_payload(obj)})
+        before = cache.get(key)
+
+        fake = AsyncMock()
+        fake.find = AsyncMock(return_value=None)  # NotFound → None
+        client = RobustCadastreClient(
+            primary=PynspdAdapter(fake), fallback=None, cache=cache,
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100, cache_policy=CachePolicy.NO,
+        )
+        assert await client.fetch_parcel("a:b:c:1") is None
+        # HTTP пошёл, несмотря на валидный кэш
+        assert fake.find.await_count == 1
+        # кэш не пишется (остался прежний payload)
+        assert cache.get(key) == before
+        assert client.stats == {
+            "hits": 0, "misses": 0, "stale": 0, "writes": 0, "errors": 0,
+        }
+
+    asyncio.run(_run())
+
+
+def test_cache_policy_refresh_cache_reads_network_writes(tmp_path):
+    async def _run():
+        cache = FileCache(tmp_path)
+        key = cache_key_point("parcel", "a:b:c:1")
+        cache.put(key, {"ok": False, "error": "not_found"})
+
+        fake = AsyncMock()
+        fake.find = AsyncMock(return_value=_stub_feat_polygon("a:b:c:1"))
+        client = RobustCadastreClient(
+            primary=PynspdAdapter(fake), fallback=None, cache=cache,
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100, cache_policy=CachePolicy.REFRESH,
+        )
+        got = await client.fetch_parcel("a:b:c:1")
+        assert got is not None and got.cad_num == "a:b:c:1"
+        assert fake.find.await_count == 1
+        assert client.stats["hits"] == 0
+        assert client.stats["writes"] == 1
+        # кэш перезаписан с not_found на ok
+        fresh = cache.get(key)
+        assert fresh is not None and fresh.get("ok") is True
+
+    asyncio.run(_run())
+
+
+def test_cache_stats_hits_misses(tmp_path):
+    async def _run():
+        cache = FileCache(tmp_path)
+        fake = AsyncMock()
+        fake.find = AsyncMock(return_value=_stub_feat_polygon("a:b:c:1"))
+        client = RobustCadastreClient(
+            primary=PynspdAdapter(fake), fallback=None, cache=cache,
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100,  # default USE
+        )
+        # 1) пустой кэш → miss + write
+        assert await client.fetch_parcel("a:b:c:1") is not None
+        # 2) тёплый кэш → hit
+        assert await client.fetch_parcel("a:b:c:1") is not None
+        # 3) payload со старой схемой → _payload_to_obj отбрасывает → stale + refetch + write
+        cache.put(
+            cache_key_point("parcel", "a:b:c:1"),
+            {"ok": True, "obj": {"_v": 1, "cad_num": "a:b:c:1"}},
+        )
+        assert await client.fetch_parcel("a:b:c:1") is not None
+
+        assert client.stats == {
+            "hits": 1, "misses": 1, "stale": 1, "writes": 2, "errors": 0,
+        }
+        assert fake.find.await_count == 2  # 1-й miss + 3-й stale
+
+    asyncio.run(_run())
+
+
+def test_cache_miss_with_network_error_logs_explicit(tmp_path, caplog):
+    async def _run():
+        caplog.set_level("ERROR", logger="nspd_client")
+
+        # fetch_parcel: пустой кэш + сеть упала
+        fake1 = AsyncMock()
+        fake1.find = AsyncMock(side_effect=RuntimeError("down"))
+        client1 = RobustCadastreClient(
+            primary=PynspdAdapter(fake1), fallback=None,
+            cache=FileCache(tmp_path / "p1"),
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100,
+        )
+        assert await client1.fetch_parcel("a:b:c:1") is None
+        assert client1.stats["errors"] == 1
+
+        # get_features: пустой кэш + сеть упала
+        async def _iter_fail(aoi, layer_def):
+            raise RuntimeError("down")
+            yield  # pragma: no cover
+
+        fake2 = MagicMock()
+        fake2.search_in_contour_iter = _iter_fail
+        client2 = RobustCadastreClient(
+            primary=PynspdAdapter(fake2, layers=["building"]), fallback=None,
+            cache=FileCache(tmp_path / "p2"),
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100,
+        )
+        assert await client2.get_features(_poly(), layer="building") == []
+        assert client2.stats["errors"] == 1
+
+    asyncio.run(_run())
+
+    # ERROR-лог «cache_miss_on_network_error» сработал в обоих путях
+    msgs = [
+        r.getMessage() for r in caplog.records if r.levelname == "ERROR"
+    ]
+    assert msgs.count("cache_miss_on_network_error") == 2
