@@ -886,3 +886,77 @@ T20 может передать точное значение из matching.* co
   URL: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}`.
 - **Не забыть:** сохранить атрибуцию ESRI и дату съёмки (T11) —
   в метаданных GeoTIFF (`TIFFTAG_IMAGEDESCRIPTION`) и отдельным файлом.
+
+---
+
+## §T10 — Снимок ESRI → GeoTIFF → EPSG:32637
+
+**Артефакт:** `data/imagery/aoi_esri_utm37n.tif` (92 MB, gitignored через `data/`), `.attribution.txt` sidecar.
+**Скрипты:** `scripts/fetch_esri_aoi.py`, `scripts/build_aoi_geotiff.py`. `scripts/recon_esri.py` — утилита разведки.
+**Конфиг:** `config.yaml → imagery.{zoom_level, target_crs, padding}` — все параметры читаются оттуда, не хардкодятся.
+
+### Выбор zoom
+
+Разведка через `recon_esri.py` для bbox AOI (`47.121225–47.138775 N, 39.747125–39.772875 E`):
+
+| zoom | tiles (без pad) | res (м/px) | решение |
+|---|---|---|---|
+| 16 | 36 | 1.625 | слишком грубо |
+| 17 | 100 | 0.813 | слишком грубо |
+| **18** | **400** | **0.406** | **✅ в диапазоне 0.3–0.6 из ТЗ** |
+| 19 | 1482 | 0.203 | вне диапазона, ×4 памяти |
+
+Выбран **z18**. Итог: **576 тайлов** (24×24) с padding=2, ~30 MB в кэше.
+
+### Padding
+
+`padding=2` тайла с каждой стороны (≈340 m WebMercator ≈ 378 m ground). При padding=1 запас после warp 3857→32637 падал до 207 m (меридианная сходимость ~1.5° на 2 км в UTM 37N). С padding=2 **AOI + 50 m margin** полностью внутри финального GeoTIFF (запас: left 262 m, bottom 229 m, right 190 m, top 217 m).
+
+### Toolchain
+
+- `requests` + `rasterio` (читает JPG) — XYZ-скачивание.
+- `rasterio` chunked write через `block_windows` — мозаика 3857 и запись финала (пик RAM ≈ 512×512 tile ≈ 768 KB).
+- `rasterio.vrt.WarpedVRT` + `Resampling.bilinear` — репроекция в `target_crs` из конфига.
+- Целевое разрешение вычисляется из `cos(lat_mid)` → **0.4063 м/px** (не хардкод).
+
+### Идемпотентность
+
+Тайлы в `data/cache/esri_tiles/18/{x}/{y}.jpg`. Второй прогон `fetch_esri_aoi.py` → `cached=576 downloaded=0 missing=0 failed=0` (0 HTTP). Флаг `--refresh` сбрасывает кэш.
+
+### Финальные параметры
+
+- **CRS**: `EPSG:32637` (UTM zone 37N).
+- **res**: `0.4062 м/px`.
+- **shape**: `(6194, 6213)`, `count=3`, `dtype=uint8`.
+- **bounds**: `left=556341.12, bottom=5218626.95, right=558865.02, top=5221143.13`.
+- **nodata**: `0` (в profile + `src_nodata`/`nodata` в `WarpedVRT`).
+
+### AOI coverage (три уровня проверки)
+
+1. **Source-level**: `mosaic_done filled=576 missing=0` — все тайлы загружены.
+2. **GeoTIFF-level**: AOI + 50 m margin полностью внутри `src.bounds` (запас 190–262 m по сторонам).
+3. **Pixel-level**: `nodata=0` — сентинел для RGB (JPEG ESRI без альфы). Один чисто-чёрный пиксель `RGB=(0,0,0)` (row=4111, col=248) попадает под nodata-маску. Neighborhood 3×3 подтверждает: **все 8 соседей валидные** (R=29..99), пиксель изолирован. Это **валидное изображение** (тень/крыша/вода), не пропуск. `0.000004%` от 23 млн пикселей AOI, не влияет на пайплайн (маска сегментации — по полигону AOI, не по nodata).
+
+### Атрибуция ESRI (частично T11)
+
+Вписана в GeoTIFF: теги `TIFFTAG_IMAGEDESCRIPTION`, `ATTRIBUTION`, `SOURCE`, `CRS_ORIGINAL`, `T10_NOTE` (проверяются через `rasterio.tags()`). Плюс `.attribution.txt` sidecar.
+
+Текст:
+> *Imagery source: Esri World Imagery. Attribution: Esri, Maxar, Earthstar Geographics, and the GIS User Community. Access: XYZ tiles from server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer. Usage: research/educational, no redistribution.*
+
+**Остаётся для T11**: дата снимка через World Imagery Wayback → `DECISIONS §T11`.
+
+### Риски .docx T10 → как решено
+
+| Риск | Решение |
+|---|---|
+| MemoryError на z19 | z18 + chunked `block_windows` (пик RAM ≈ 768 KB) |
+| Дыры по краям AOI | padding=2, верифицировано AOI+50m внутри GeoTIFF |
+| Google/Яндекс | Только ESRI (`server.arcgisonline.com`) |
+
+### Верификация без gdalinfo
+
+`gdalinfo` нет в PATH, используем rasterio:
+
+```bash
+uv run python -c "import rasterio; s=rasterio.open('data/imagery/aoi_esri_utm37n.tif'); print(s.crs, s.res, s.bounds, s.shape, s.nodata, list(s.tags()))"
