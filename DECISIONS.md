@@ -2,7 +2,7 @@
 
 Журнал решений по тестовому заданию CadastreCheck. Фиксирует выбор AOI,
 окружение, конфигурацию, доступ к НСПД, ограничения и кэш. На текущем
-этапе закрыты шаги T1–T8; дальнейшие шаги (T9+) — в roadmap в конце.
+этапе закрыты шаги T1–T9; дальнейшие шаги (T10+) — в roadmap в конце.
 
 ---
 
@@ -636,16 +636,200 @@ uv run python scripts/probe_nspd.py --config config.yaml
 `aoi_loaded area_km2=3.812` (геодезическая по WGS84, `pyproj.Geod`) —
 совпадает с §T1–T2 (3.81 км²).
 
-### Что на T9
+### Что было запланировано на T9 (закрыто)
 
-Из HANDOFF и §T7:
+Из §T7 и HANDOFF T9:
 
-- `oks_effective_geometry(oks, parcels) -> BaseGeometry` — ОКС без
-  контура (`Point` в `attrs["attachment_point_wkt"]`) связывается
-  с участком и получает `inherited_from_parcel=True`.
-- `NspdRequestAdapter.get_features` ОКС без контура **не находит** —
-  документированное ограничение §T7; клиент не обязан их находить,
-  T9 восстанавливает связь через `oks_effective_geometry`.
-- `61:44:0060958:173` — реальный тест-кейс (`no_coords=True`,
-  площадь 152 м²): `has_contour=False`, `Point` в WKT. Не должен
-  порождать ложных UNREGISTERED / OUT_OF_PARCEL.
+| Пункт | Статус |
+|---|---|
+| `oks_effective_geometry(oks, parcels) -> BaseGeometry` — ОКС без контура связывается с участком, `inherited_from_parcel=True` | ✅ `src/matching.py`, 6 тестов. **Сигнатура `tuple[BaseGeometry \| None, bool]`, а не `BaseGeometry`** — отклонение от буквы §T8, см. §T9 «Отклонение от буквы §T8» |
+| `NspdRequestAdapter.get_features` ОКС без контура **не находит** — T9 восстанавливает связь | ⚠️ Связь ОКС→участок в area-дампе не хранится, и в AOI Койсуг **0 ОКС без контура** (см. §T9 «Что показала инвентаризация»). Логика готова, на этом AOI не активируется. Проверка на реальном кейсе — T28 (второй AOI) |
+| `61:44:0060958:173` — реальный тест-кейс (`no_coords=True`, 152 м²) | ⚠️ В area-дампе отсутствует: объект есть только в точечном кэше (см. §T7 live-тест). `oks_effective_geometry` покрыт синтетикой (explicit parent + spatial по `Point`), реальный объект проверим на T28 |
+
+---
+
+## T9: Логика ОКС без контура
+
+### Артефакты
+
+- `src/matching.py`:
+  - `oks_effective_geometry(oks, parcels) -> tuple[BaseGeometry | None, bool]`
+    — «эффективная» геометрия ОКС + флаг `inherited_from_parcel`;
+  - `find_parcel_by_point(point, parcels)` — линейный `covers` (3311 участков
+    в Койсуге, hot path не болит; если станет — заменим на `STRtree`);
+  - `iter_oks_without_contour(oks_list)` — итератор `has_contour=False`;
+  - `_find_parent_cad_num(oks)` — явная связь ОКС→участок в
+    `attrs.options` / `attrs.properties.options` по 4 ключам.
+- `tests/test_matching.py` — **6 тестов** (синтетика):
+  1. свой контур → `(oks.geometry, False)`;
+  2. `has_contour=False` + `parent_cad_num` в `attrs` → `(parcel.geometry, True)`;
+  3. `has_contour=False` + `attachment_point_wkt` → `covers` находит участок → `(parcel.geometry, True)`;
+  4. `has_contour=False` без parent/attachment → `(None, False)`;
+  5. `has_contour=False` + attachment вне любого участка → `(None, False)`;
+  6. anomaly: `has_contour=False`, но `geometry` заполнена → `(geometry, False)`.
+- `scripts/stats_oks_contours.py` — воспроизводимая статистика по кэшу.
+  Запуск: `uv run python scripts/stats_oks_contours.py --cache-dir data/cache/nspd`.
+- **Покрытие `src/matching.py` — 84%.** Непокрытые ветки — защитные:
+  участок без геометрии в индексе; `attrs.properties.options` (второй
+  источник явной связи, в Койсуге оба пустые); битый `attachment_point_wkt`
+  (`try/except`); `parent_cad_num` есть, но участка нет в `parcels`.
+
+### Что показала инвентаризация AOI Койсуг
+
+Скрипт `scripts/stats_oks_contours.py`, `data/cache/nspd/`, прогон 2026-10-27:
+
+| Слой | total | has_contour=True | has_contour=False |
+|---|---:|---:|---:|
+| building   | 1170 | 1170 | **0** |
+| structure  |  176 |  176 | **0** |
+| unfinished |    6 |    6 | **0** |
+| **TOTAL OKS** | **1352** | **1352** | **0** |
+
+Дополнительно из `payload` (разведка T9.0):
+
+| Признак | Значение |
+|---|---|
+| `opts.no_coords=True` | **0** |
+| `attrs.facility_cad_number` непустое | **0** |
+| `attrs.attachment_point_wkt` | **0** |
+| `opts.united_cad_numbers` / `opts.intersected_cad_numbers` непустые | **0** |
+| Явная связь ОКС→участок в дампе | **отсутствует** |
+| Связь участок→ОКС в дампе (`opts.buildings`) | **отсутствует** |
+
+`parcels_indexed=3311`, `oks_without_contour_inheritable=0` — fallback
+на этом AOI **не активируется ни разу**.
+
+**Вывод для метрик:** тезис ТЗ «самый частый источник ложных
+UNREGISTERED — ОКС без контура» к AOI Койсуг **не относится**.
+В этом AOI (плотная ИЖС/СНТ, все ОКС с контуром) проблема физически
+отсутствует. Надо явно проговорить в отчёте T30 — иначе ревьюер
+ждёт разбор типовой проблемы, а разбирать в Койсуге нечего.
+
+### Почему реализация всё равно нужна
+
+1. **Второй AOI (T28).** Статистика по нему ещё неизвестна; в сельской
+   местности доля `no_coords=true` в НСПД обычно выше. Код готов.
+2. **Схемы НСПД меняются (§T7).** Если завтра `has_contour` начнёт
+   возвращать `False` для части ОКС, регрессии в классификаторе
+   не будет — матчинг уже умеет наследовать.
+3. **Синтетические тесты — регрессионная сеть** на 4 ветки, включая
+   anomaly-ветку. При рефакторинге T20/T21 сразу поймаем поломку
+   семантики `inherited_from_parcel`.
+4. **Стоимость — нулевая.** На AOI без ОКС без контура
+   `oks_effective_geometry` возвращает `(oks.geometry, False)`
+   на первой ветке, O(1).
+
+### Логика `oks_effective_geometry` — 4 ветки
+
+Приоритет — от самого дешёвого/надёжного к самому дорогому:
+
+1. **Свой контур.** `has_contour=True`, `geometry is not None`,
+   `not is_empty` → `(oks.geometry, False)`. Дефолт для 100%
+   ОКС в Койсуге (1352/1352).
+2. **Явная связь ОКС→участок.** `attrs.options` /
+   `attrs.properties.options` по ключам `parent_cad_num`,
+   `parcel_cad_num`, `land_record_cad_num`,
+   `parent_land_record_cad_num` → `(parcels[parent].geometry, True)`.
+   В Койсуге — **0 попаданий**, но в других регионах НСПД поле
+   встречается.
+3. **Spatial по `attrs.attachment_point_wkt`.** Если WKT-точка есть
+   и `parcel.geometry.covers(point)` → `(parcel.geometry, True)`.
+   Битый WKT не роняет пайплайн (`try/except` → `None`).
+4. **Anomaly-ветка.** `has_contour=False`, но `geometry` заполнена
+   (схема НСПД «съехала», либо `has_contour` не выставлен).
+   Возвращаем `(geometry, False)` — наследованием **не считаем**,
+   но и `None` не отдаём: лучше использовать то, что есть.
+
+`(None, False)` — если ничего не нашли. Классификатор должен
+трактовать такой ОКС как «нет данных», а не «нет здания».
+
+### Влияние на классификатор (T20/T21/T24)
+
+`oks_effective_geometry` — только матчинг, не классификация. Правила
+для T20/T21/T24:
+
+- **UNREGISTERED (T20):** детекция внутри ОКС с `inherited=True`
+  **не флагуется** — ОКС учтён в кадастре, просто без контура.
+  Это ровно та «лава ложных UNREGISTERED», о которой предупреждает ТЗ.
+- **MISSING (T21):** для `inherited=True` детекции сравниваем
+  с геометрией **участка**, а не с пустотой — иначе ОКС без контура
+  всегда «missing» (FN-машина).
+- **AREA_MISMATCH (T24):** `inherited=True` **пропускаем**.
+  `area_cad_m2` относится к ОКС, а `area_img_m2` — к детекции;
+  сравнение с площадью участка даст ложный флаг. Лучше пропустить,
+  чем соврать.
+- **OUT_OF_PARCEL (T22), NO_PARCEL (T23):** работают по участкам,
+  `inherited_from_parcel` на них не влияет.
+
+В `discrepancies.gpkg` (T26) пойдёт **оригинальная** геометрия ОКС
+(или `None`) + `cad_number` родительского участка в отдельном поле +
+`inherited_from_parcel: bool`. Подмены геометрии ОКС геометрией
+участка в выходном файле **не будет** — иначе `discrepancies.gpkg`
+покажет «здание = участок», что сломает визуальную проверку в QGIS.
+
+### Отклонение от буквы §T8 / §T7
+
+§T8 (и §T7) предписывает сигнатуру
+`oks_effective_geometry(oks, parcels) -> BaseGeometry`. Реализовано
+`-> tuple[BaseGeometry | None, bool]`.
+
+**Почему:**
+
+- **`None` необходим.** ОКС без контура, для которого участок не нашёлся,
+  не должен молча получить «пустую» геометрию (иначе классификатор
+  увидит `Point(0,0)` / `Polygon()` и выдаст мусорный флаг).
+- **`bool` необходим.** ТЗ T9 явно требует флаг `inherited_from_parcel=True`.
+  Возврат `BaseGeometry` + отдельный аксессор — API с состоянием,
+  хуже для тестов и для Streamlit T27 (нужен ещё один вызов).
+- **Функционально эквивалентно** по ТЗ: «вернуть либо собственный
+  контур, либо геометрию связанного участка с флагом». Мы возвращаем
+  ровно это.
+
+Это **сознательное** отклонение, не случайное. Обратная совместимость
+не нужна: T20+ ещё не написан.
+
+### Чего сознательно не сделали
+
+- **Не тянем `related` из `pynspd`.** `dump_nspd_aoi.py` не запрашивает
+  связь ОКС↔участок. Для Койсуга бессмысленно (0 ОКС без контура),
+  для второго AOI — отдельная задача (T28).
+- **Не кэшируем `oks_effective_geometry`.** Функция чистая, O(N)
+  по участкам; 3311 участков, `covers` на `Point` — микросекунды.
+  Если на T28 станет горячо — заменим `parcels` на `STRtree` без
+  изменения контракта (комментарий в docstring уже есть).
+- **Не трогаем `NspdRequestAdapter`.** §T7 честно фиксирует, что
+  площадной fallback ОКС без контура не находит. Это **не блокер**:
+  T9 восстанавливает связь на уровне матчинга, клиенту не обязательно
+  находить такие ОКС в area-запросе. Если понадобится —
+  `get_oks_by_land_plot` или bbox-API через `requests`, кандидат на T28.
+
+### Проверки после T9
+
+    uv run pytest -q
+    # → 56 passed, 3 skipped (T7: 50 + T9: 6)
+
+    uv run pytest --cov=src --cov-report=term-missing -q
+    # → TOTAL 90% (matching.py 84%, непокрытые ветки — защитные)
+
+    uv run python scripts/stats_oks_contours.py --cache-dir data/cache/nspd
+    # → building 1170/0, structure 176/0, unfinished 6/0, TOTAL 1352/0
+    # → parcels_indexed=3311, oks_without_contour_inheritable=0
+
+    uv run python scripts/dump_nspd_aoi.py --config config.yaml
+    # → 4663 фичи, cache_summary {hits:4}, running_on_cache, 0 HTTP (T8-контракт цел)
+
+### Что на T10
+
+Из ТЗ и HANDOFF T10:
+
+- **Скачать ESRI World Imagery** XYZ-тайлы для AOI на zoom 18–19
+  (~0.3–0.6 м), сшить в GeoTIFF, перепроецировать в EPSG:32637
+  (UTM zone 37N) — метрические площади/буферы.
+- Артефакт: `data/imagery/aoi_esri_utm37n.tif`, корректный CRS,
+  покрытие без «дыр» по краям.
+- **Риск:** MemoryError на zoom 19 при склейке; дыры по краям AOI,
+  если не взять padding 1–2 тайла.
+- **Инструменты:** `requests + Pillow + rasterio` или `tilegrab`.
+  URL: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}`.
+- **Не забыть:** сохранить атрибуцию ESRI и дату съёмки (T11) —
+  в метаданных GeoTIFF (`TIFFTAG_IMAGEDESCRIPTION`) и отдельным файлом.
