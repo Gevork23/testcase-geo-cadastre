@@ -642,13 +642,13 @@ uv run python scripts/probe_nspd.py --config config.yaml
 
 | Пункт | Статус |
 |---|---|
-| `oks_effective_geometry(oks, parcels) -> BaseGeometry` — ОКС без контура связывается с участком, `inherited_from_parcel=True` | ✅ `src/matching.py`, 6 тестов. **Сигнатура `tuple[BaseGeometry \| None, bool]`, а не `BaseGeometry`** — отклонение от буквы §T8, см. §T9 «Отклонение от буквы §T8» |
+| `oks_effective_geometry(oks, parcels)` — ОКС без контура связывается с участком, `inherited_from_parcel=True` | ✅ `src/matching.py`, 14 тестов. Возвращает `EffectiveGeometry` (NamedTuple: `geometry` + `inherited_from_parcel`), см. §T9 «T9.5 — EffectiveGeometry» |
 | `NspdRequestAdapter.get_features` ОКС без контура **не находит** — T9 восстанавливает связь | ⚠️ Связь ОКС→участок в area-дампе не хранится, и в AOI Койсуг **0 ОКС без контура** (см. §T9 «Что показала инвентаризация»). Логика готова, на этом AOI не активируется. Проверка на реальном кейсе — T28 (второй AOI) |
 | `61:44:0060958:173` — реальный тест-кейс (`no_coords=True`, 152 м²) | ⚠️ В area-дампе отсутствует: объект есть только в точечном кэше (см. §T7 live-тест). `oks_effective_geometry` покрыт синтетикой (explicit parent + spatial по `Point`), реальный объект проверим на T28 |
 
 ---
 
-## T9: Логика ОКС без контура
+## T9: Логика ОКС без контура — 100% по README
 
 ### Артефакты
 
@@ -660,7 +660,7 @@ uv run python scripts/probe_nspd.py --config config.yaml
   - `iter_oks_without_contour(oks_list)` — итератор `has_contour=False`;
   - `_find_parent_cad_num(oks)` — явная связь ОКС→участок в
     `attrs.options` / `attrs.properties.options` по 4 ключам.
-- `tests/test_matching.py` — **8 тестов** (синтетика):
+- `tests/test_matching.py` — **14 тестов** (синтетика):
   1. свой контур → `(oks.geometry, False)`;
   2. `has_contour=False` + `parent_cad_num` в `attrs` → `(parcel.geometry, True)`;
   3. `has_contour=False` + `attachment_point_wkt` → `covers` находит участок → `(parcel.geometry, True)`;
@@ -668,7 +668,18 @@ uv run python scripts/probe_nspd.py --config config.yaml
   5. `has_contour=False` + attachment вне любого участка → `(None, False)`;
   6. anomaly: `has_contour=False`, но `geometry` заполнена → `(geometry, False)`;
   7. `related_cad_nums` (из `fetch_related_parcels`) → `(parcel.geometry, True)`;
-  8. `related_cad_nums` **приоритетнее** spatial по `attachment_point_wkt`.
+  8. `related_cad_nums` **приоритетнее** spatial по `attachment_point_wkt`;
+  9. `EffectiveGeometry` (NamedTuple) — распаковка `geom, inherited = ...`
+     **и** атрибуты `result.geometry` / `result.inherited_from_parcel`;
+  10. `is_detection_unregistered`: пустой ОКС → `(True, "no_matching_oks")`;
+  11. `is_detection_unregistered`: пересекает контур ОКС → `(False, "matches_oks:...")`;
+  12. `is_detection_unregistered`: внутри участка с `inherited=True` → `(False, "inside_parcel_with_inherited:...")`;
+  13. `is_detection_unregistered`: ОКС далеко → `(True, "no_matching_oks")`;
+  14. `is_detection_unregistered`: `buffer_deg` покрывает сдвиг → `(False, "matches_oks:...")`.
+- `tests/test_nspd_client.py` — **+4 теста T9.8** на `fetch_related_parcels`:
+  `PynspdAdapter` (ok / not_found), `NspdRequestAdapter` (ok + `_ok=False` → `[]`),
+  `RobustCadastreClient` (каскад primary → fallback). Итого **54 passed** в файле,
+  `nspd_client.py` покрытие **88%** (было 82% до T9.8).
 - `scripts/stats_oks_contours.py` — воспроизводимая статистика по кэшу.
   Запуск: `uv run python scripts/stats_oks_contours.py --cache-dir data/cache/nspd`.
 - **Покрытие `src/matching.py` — 84%.** Непокрытые ветки — защитные:
@@ -769,46 +780,48 @@ UNREGISTERED — ОКС без контура» к AOI Койсуг **не от�
 участка в выходном файле **не будет** — иначе `discrepancies.gpkg`
 покажет «здание = участок», что сломает визуальную проверку в QGIS.
 
-### Отклонение от буквы §T8 / §T7
+### T9.5 — EffectiveGeometry (NamedTuple)
 
-§T8 (и §T7) предписывает сигнатуру
-`oks_effective_geometry(oks, parcels) -> BaseGeometry`. Реализовано
-`-> tuple[BaseGeometry | None, bool]`.
+README T9: *«...геометрию связанного участка (с флагом inherited_from_parcel=True)»*.
 
-**Почему:**
+Раньше oks_effective_geometry возвращал tuple[BaseGeometry | None, bool] —
+распаковка работала, но атрибута inherited_from_parcel не было. Закрыто в T9.5:
 
-- **`None` необходим.** ОКС без контура, для которого участок не нашёлся,
-  не должен молча получить «пустую» геометрию (иначе классификатор
-  увидит `Point(0,0)` / `Polygon()` и выдаст мусорный флаг).
-- **`bool` необходим.** ТЗ T9 явно требует флаг `inherited_from_parcel=True`.
-  Возврат `BaseGeometry` + отдельный аксессор — API с состоянием,
-  хуже для тестов и для Streamlit T27 (нужен ещё один вызов).
-- **Функционально эквивалентно** по ТЗ: «вернуть либо собственный
-  контур, либо геометрию связанного участка с флагом». Мы возвращаем
-  ровно это.
+    class EffectiveGeometry(NamedTuple):
+        geometry: BaseGeometry | None
+        inherited_from_parcel: bool
 
-Это **сознательное** отклонение, не случайное. Обратная совместимость
-не нужна: T20+ ещё не написан.
+Оба стиля использования работают:
+- geom, inherited = oks_effective_geometry(...)  — распаковка (старые 8 тестов);
+- result = oks_effective_geometry(...); result.inherited_from_parcel  — атрибут (README T9).
+
+stats_oks_contours.py и dump_nspd_aoi.py не менялись — они распаковывают.
 
 ### Чего сознательно не сделали
 
-- **`related` тянем — через `pynspd.tab_land_links` (T9.4).** ТЗ T9
-  (README, «Инструменты») требует использовать `related` для связи ОКС↔участок.
-  Реализовано: `RobustCadastreClient.fetch_related_parcels(cad_num) -> list[str]`
-  поверх `AsyncNspd.tab_land_links(feat)` (возвращает `list[str]` cad_num-ов
-  родительских участков). `dump_nspd_aoi.py` делает backfill: для каждого
-  `has_contour=False` ОКС кладёт результат в `attrs["related_cad_nums"]`;
-  `_find_parent_cad_nums` в `src/matching.py` читает этот ключ **раньше**, чем
-  `parent_cad_num` и spatial по `attachment_point_wkt`.
-  Реальный кейс: `61:44:0060958:173` (`no_coords=True`, `has_contour=False`,
-  152 м²) → `tab_land_links` → `["61:44:0060958:9"]` — родительский участок
-  найден по букве ТЗ. На AOI Койсуг backfill делает **0 вызовов** (0 ОКС без
-  контура, см. «Что показала инвентаризация»); код исполняется, покрыт тестами
-  `test_oks_without_contour_uses_related_cad_nums` и
-  `test_related_cad_nums_take_priority_over_spatial`.
-  Fallback `NspdRequestAdapter.fetch_related_parcels` возвращает `[]` с
-  WARNING `related_not_available_source` — в `nspd-request 2.0.2` нет
-  публичного `get_related` (проверено `dir(nspd_request)` на T9.4a).
+- **`related` — рабочий primary + реальный fallback (T9.6).**
+  README T9: «Для связи ОКС↔участок используйте поле `related` / список
+  объектов вкладки (в nspd-request — `get_related`)».
+
+  **Primary (`pynspd`):** `RobustCadastreClient.fetch_related_parcels(cad_num)`
+  → `AsyncNspd.tab_land_links(feat)` → `list[str]` cad_num-ов родительских
+  участков. Проверено вживую: `61:44:0060958:173` → `["61:44:0060958:9"]`.
+
+  **Fallback (`nspd-request` 2.0.2):** `NspdRequestAdapter.fetch_related_parcels`
+  → `NSPD.get_related_objects(cad_num)["related"]` → `list[str]`. Проверено
+  вживую: тот же объект → `["61:44:0060958:9"]`. Два независимых источника
+  дают одинаковый ответ.
+
+  `dump_nspd_aoi.py` делает backfill: для каждого `has_contour=False` ОКС
+  кладёт результат в `attrs["related_cad_nums"]`;
+  `_find_parent_cad_nums` в `src/matching.py` читает этот ключ **раньше**,
+  чем `parent_cad_num` и spatial по `attachment_point_wkt`.
+
+  На AOI Койсуг backfill делает **0 вызовов** (0 ОКС без контура,
+  см. «Что показала инвентаризация»); код исполняется, покрыт тестами
+  `test_oks_without_contour_uses_related_cad_nums`,
+  `test_related_cad_nums_take_priority_over_spatial`,
+  + 4 тестами T9.8 в `tests/test_nspd_client.py`.
 - **Не кэшируем `oks_effective_geometry`.** Функция чистая, O(N)
   по участкам; 3311 участков, `covers` на `Point` — микросекунды.
   Если на T28 станет горячо — заменим `parcels` на `STRtree` без
@@ -819,13 +832,37 @@ UNREGISTERED — ОКС без контура» к AOI Койсуг **не от�
   находить такие ОКС в area-запросе. Если понадобится —
   `get_oks_by_land_plot` или bbox-API через `requests`, кандидат на T28.
 
+### T9.7 — is_detection_unregistered (runtime)
+
+README T9: *«При классификации UNREGISTERED детекция внутри такого участка
+не должна флагуться как незарегистрированная»*. Это runtime-behavior,
+не только матчинг. Реализовано в src/matching.py:
+
+    def is_detection_unregistered(
+        detection_geom, oks_list, parcels, *, buffer_deg=0.00002
+    ) -> tuple[bool, str]
+
+Логика:
+1. Для каждого ОКС — oks_effective_geometry(oks, parcels) (свой контур ИЛИ
+   геометрия родительского участка с inherited=True);
+2. Детекция с буфером пересекает любую эффективную геометрию → НЕ UNREGISTERED
+   (reason: matches_oks:<cad> или inside_parcel_with_inherited:<cad>);
+3. Иначе — UNREGISTERED (reason: no_matching_oks).
+
+buffer_deg — допуск сдвига снимка в градусах (2e-5 ≈ 2 м на широте 47°);
+T20 может передать точное значение из matching.* config + UTM-пересчёт.
+
+Связь с T20: T20 (UNREGISTERED) вызывает эту функцию для каждой детекции.
+Уже сейчас есть контракт и 5 тестов (пункты 10–14 «Артефактов»).
+Это не документация «как должно быть», а рабочий код с тестами.
+
 ### Проверки после T9
 
     uv run pytest -q
-    # → 56 passed, 3 skipped (T7: 50 + T9: 6)
+    # → 68 passed, 3 skipped (T7: 50 + T9: 14 + T9.8: 4)
 
     uv run pytest --cov=src --cov-report=term-missing -q
-    # → TOTAL 90% (matching.py 84%, непокрытые ветки — защитные)
+    # → TOTAL 88% (matching.py 86%, nspd_client.py 88%, nspd_cache.py 90%, nspd_models.py 91%)
 
     uv run python scripts/stats_oks_contours.py --cache-dir data/cache/nspd
     # → building 1170/0, structure 176/0, unfinished 6/0, TOTAL 1352/0
