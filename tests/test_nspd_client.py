@@ -156,6 +156,62 @@ def test_file_cache_corrupted_json(tmp_path):
 # ============================================================
 # 2. Примитивы
 # ============================================================
+def test_file_cache_put_replace_fails_cleans_tmp(tmp_path, monkeypatch):
+    """T9.10: os.replace падает → tempfile удалён, target не тронут, exception проброшен."""
+    cache = FileCache(tmp_path, ttl_days=7)
+    # валидное значение, которое НЕ должно быть перезаписано
+    cache.put("k1", {"a": 1})
+    assert cache.get("k1") == {"a": 1}
+
+    unlinked = []
+    real_unlink = os.unlink
+
+    def _spy_unlink(p):
+        unlinked.append(p)
+        return real_unlink(p)
+
+    def _boom_replace(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("src.nspd_cache.os.replace", _boom_replace)
+    monkeypatch.setattr("src.nspd_cache.os.unlink", _spy_unlink)
+
+    with pytest.raises(OSError, match="disk full"):
+        cache.put("k2", {"b": 2})
+
+    # unlink вызван ровно один раз с tmp-путём
+    assert len(unlinked) == 1
+    assert unlinked[0].endswith(".tmp")
+
+    # temp-файлов не осталось
+    tmp_leftovers = [p for p in tmp_path.iterdir() if p.suffix == ".tmp"]
+    assert tmp_leftovers == []
+
+    # старый ключ не тронут, новый не создан
+    assert cache.get("k1") == {"a": 1}
+    assert cache.get("k2") is None
+
+
+def test_file_cache_put_replace_and_unlink_fail(tmp_path, monkeypatch):
+    """T9.10: os.replace и os.unlink оба падают → внутренний except OSError: pass → raise проброшен."""
+    cache = FileCache(tmp_path, ttl_days=7)
+
+    def _boom_replace(*a, **kw):
+        raise OSError("replace failed")
+
+    def _boom_unlink(p):
+        raise OSError("unlink failed")
+
+    monkeypatch.setattr("src.nspd_cache.os.replace", _boom_replace)
+    monkeypatch.setattr("src.nspd_cache.os.unlink", _boom_unlink)
+
+    # unlink-ошибка проглатывается, наружу идёт исходный replace-error
+    with pytest.raises(OSError, match="replace failed"):
+        cache.put("k", {"x": 1})
+
+    assert cache.get("k") is None
+
+
 def test_is_contour_only_polygons():
     assert _is_contour(None) is False
     assert _is_contour(Point(0, 0)) is False
