@@ -16,6 +16,7 @@ paths:
 imagery:
   zoom_level: 18       # 18 или 19
   target_crs: "EPSG:32637" # UTM zone 37N для метров
+  padding: 2           # tiles per side (2 -> AOI+50m margin after warp 3857->32637)
 
 osm:
   overpass_url: "https://overpass-api.de/api/interpreter"
