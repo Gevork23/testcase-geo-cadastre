@@ -255,6 +255,26 @@ class PynspdAdapter:
             return None
         return _to_object(feat, "pynspd")
 
+    async def fetch_related_parcels(self, cad_num: str) -> list[str]:
+        """T9.4: cad_nums родительских участков ОКС через related/tab_land_links."""
+        try:
+            feat = await self.client.find(cad_num)
+        except NotFound:
+            return []
+        if feat is None:
+            return []
+        try:
+            links = await self.client.tab_land_links(feat)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "tab_land_links_failed",
+                extra={"cad_num": cad_num, "err": type(e).__name__},
+            )
+            return []
+        if not links:
+            return []
+        return [x for x in links if isinstance(x, str) and x.strip()]
+
     async def get_features(
         self, aoi: AOI, *, layer: str | None = None
     ) -> list[CadastralObject]:
@@ -522,6 +542,14 @@ class NspdRequestAdapter:
             extra={"points": len(xs_ys), "objects": len(results), "layer": layer},
         )
         return list(results.values())
+
+    async def fetch_related_parcels(self, cad_num: str) -> list[str]:
+        """T9.4 fallback: nspd-request 2.0.2 не даёт публичный related API."""
+        log.warning(
+            "related_not_available_source",
+            extra={"cad_num": cad_num, "source": "nspd_request"},
+        )
+        return []
 
     async def _fetch_by_point(
         self, lon: float, lat: float, layer: str | None
@@ -845,6 +873,38 @@ class RobustCadastreClient:
         objects = objects or []
         self._cached_put(key, [_obj_to_payload(o) for o in objects])
         return objects
+
+    async def fetch_related_parcels(self, cad_num: str) -> list[str]:
+        """T9.4: родительские участки ОКС (pynspd tab_land_links → fallback).
+
+        Не кэшируется: точечный вызов на конкретный ОКС; на Koisug — 0 раз
+        (AOI не содержит ОКС без контура, см. §T9).
+        """
+        try:
+            result = await self._rate_limited(
+                lambda: self.primary.fetch_related_parcels(cad_num)
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "related_primary_failed",
+                extra={"cad_num": cad_num, "err": type(e).__name__},
+            )
+            result = []
+        if result:
+            return result
+        if self.fallback is None:
+            return result
+        try:
+            fb = await self._rate_limited(
+                lambda: self.fallback.fetch_related_parcels(cad_num)
+            )
+            return fb
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "related_fallback_failed",
+                extra={"cad_num": cad_num, "err": type(e).__name__},
+            )
+            return result
 
     async def fetch_oks_in_bbox(
         self,

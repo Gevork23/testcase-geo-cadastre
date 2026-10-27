@@ -35,6 +35,7 @@ def _oks_without_contour(
     *,
     parent_cad_num: str | None = None,
     attachment_point_wkt: str | None = None,
+    related_cad_nums: list[str] | None = None,
     geometry: object | None = None,
 ) -> CadastralObject:
     """ОКС без контура: has_contour=False, geometry=None (по умолчанию)."""
@@ -43,6 +44,8 @@ def _oks_without_contour(
         attrs["options"] = {"parent_cad_num": parent_cad_num}
     if attachment_point_wkt is not None:
         attrs["attachment_point_wkt"] = attachment_point_wkt
+    if related_cad_nums is not None:
+        attrs["related_cad_nums"] = related_cad_nums
     return CadastralObject(
         cad_num=cad_num,
         object_type="building",
@@ -132,3 +135,35 @@ def test_oks_has_contour_false_but_geometry_present_falls_back_to_geometry():
 
     assert geom is poly
     assert inherited is False
+
+
+# --- 6) related_cad_nums: наследуем участок через related из tab_land_links ---
+
+def test_oks_without_contour_uses_related_cad_nums():
+    parcel = _parcel("61:44:2:2", [(0, 0), (0, 10), (10, 10), (10, 0)])
+    oks = _oks_without_contour("61:44:3:3", related_cad_nums=["61:44:2:2"])
+    parcels = {"61:44:2:2": parcel}
+
+    geom, inherited = oks_effective_geometry(oks, parcels)
+
+    assert geom is parcel.geometry
+    assert inherited is True
+
+
+# --- 7) related_cad_nums приоритетнее spatial (attachment_point_wkt) --------
+
+def test_related_cad_nums_take_priority_over_spatial():
+    # spatial по точке (5,5) нашёл бы parcel_a, но related указывает на parcel_b
+    parcel_a = _parcel("61:44:A", [(0, 0), (0, 10), (10, 10), (10, 0)])
+    parcel_b = _parcel("61:44:B", [(20, 20), (20, 30), (30, 30), (30, 20)])
+    oks = _oks_without_contour(
+        "61:44:3:3",
+        attachment_point_wkt=Point(5, 5).wkt,
+        related_cad_nums=["61:44:B"],
+    )
+    parcels = {"61:44:A": parcel_a, "61:44:B": parcel_b}
+
+    geom, inherited = oks_effective_geometry(oks, parcels)
+
+    assert geom is parcel_b.geometry
+    assert inherited is True

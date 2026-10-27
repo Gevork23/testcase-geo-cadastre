@@ -660,13 +660,15 @@ uv run python scripts/probe_nspd.py --config config.yaml
   - `iter_oks_without_contour(oks_list)` — итератор `has_contour=False`;
   - `_find_parent_cad_num(oks)` — явная связь ОКС→участок в
     `attrs.options` / `attrs.properties.options` по 4 ключам.
-- `tests/test_matching.py` — **6 тестов** (синтетика):
+- `tests/test_matching.py` — **8 тестов** (синтетика):
   1. свой контур → `(oks.geometry, False)`;
   2. `has_contour=False` + `parent_cad_num` в `attrs` → `(parcel.geometry, True)`;
   3. `has_contour=False` + `attachment_point_wkt` → `covers` находит участок → `(parcel.geometry, True)`;
   4. `has_contour=False` без parent/attachment → `(None, False)`;
   5. `has_contour=False` + attachment вне любого участка → `(None, False)`;
-  6. anomaly: `has_contour=False`, но `geometry` заполнена → `(geometry, False)`.
+  6. anomaly: `has_contour=False`, но `geometry` заполнена → `(geometry, False)`;
+  7. `related_cad_nums` (из `fetch_related_parcels`) → `(parcel.geometry, True)`;
+  8. `related_cad_nums` **приоритетнее** spatial по `attachment_point_wkt`.
 - `scripts/stats_oks_contours.py` — воспроизводимая статистика по кэшу.
   Запуск: `uv run python scripts/stats_oks_contours.py --cache-dir data/cache/nspd`.
 - **Покрытие `src/matching.py` — 84%.** Непокрытые ветки — защитные:
@@ -790,9 +792,23 @@ UNREGISTERED — ОКС без контура» к AOI Койсуг **не от�
 
 ### Чего сознательно не сделали
 
-- **Не тянем `related` из `pynspd`.** `dump_nspd_aoi.py` не запрашивает
-  связь ОКС↔участок. Для Койсуга бессмысленно (0 ОКС без контура),
-  для второго AOI — отдельная задача (T28).
+- **`related` тянем — через `pynspd.tab_land_links` (T9.4).** ТЗ T9
+  (README, «Инструменты») требует использовать `related` для связи ОКС↔участок.
+  Реализовано: `RobustCadastreClient.fetch_related_parcels(cad_num) -> list[str]`
+  поверх `AsyncNspd.tab_land_links(feat)` (возвращает `list[str]` cad_num-ов
+  родительских участков). `dump_nspd_aoi.py` делает backfill: для каждого
+  `has_contour=False` ОКС кладёт результат в `attrs["related_cad_nums"]`;
+  `_find_parent_cad_nums` в `src/matching.py` читает этот ключ **раньше**, чем
+  `parent_cad_num` и spatial по `attachment_point_wkt`.
+  Реальный кейс: `61:44:0060958:173` (`no_coords=True`, `has_contour=False`,
+  152 м²) → `tab_land_links` → `["61:44:0060958:9"]` — родительский участок
+  найден по букве ТЗ. На AOI Койсуг backfill делает **0 вызовов** (0 ОКС без
+  контура, см. «Что показала инвентаризация»); код исполняется, покрыт тестами
+  `test_oks_without_contour_uses_related_cad_nums` и
+  `test_related_cad_nums_take_priority_over_spatial`.
+  Fallback `NspdRequestAdapter.fetch_related_parcels` возвращает `[]` с
+  WARNING `related_not_available_source` — в `nspd-request 2.0.2` нет
+  публичного `get_related` (проверено `dir(nspd_request)` на T9.4a).
 - **Не кэшируем `oks_effective_geometry`.** Функция чистая, O(N)
   по участкам; 3311 участков, `covers` на `Point` — микросекунды.
   Если на T28 станет горячо — заменим `parcels` на `STRtree` без

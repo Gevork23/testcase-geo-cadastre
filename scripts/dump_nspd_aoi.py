@@ -145,6 +145,30 @@ async def run(
             collected.extend(objs)
             log.info("layer_done layer=%s count=%d", ln, len(objs))
 
+        # T9.4: backfill related_cad_nums для ОКС без контура (related из ТЗ T9).
+        # На AOI Койсуг — 0 таких ОКС, т.е. 0 HTTP. Если встретятся — тянем.
+        n_no_contour = 0
+        n_with_related = 0
+        for obj in collected:
+            if obj.has_contour or not obj.cad_num:
+                continue
+            n_no_contour += 1
+            try:
+                related = await client.fetch_related_parcels(obj.cad_num)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "related_backfill_failed",
+                    extra={"cad_num": obj.cad_num, "err": type(e).__name__},
+                )
+                continue
+            if related:
+                obj.attrs["related_cad_nums"] = related
+                n_with_related += 1
+        log.info(
+            "related_backfill oks_without_contour=%d with_related=%d",
+            n_no_contour, n_with_related,
+        )
+
         stats = _write_dump(collected, out_path)
         log.info(
             "dump_written path=%s features=%d skipped=%d total=%d",

@@ -39,19 +39,34 @@ _PARENT_CAD_NUM_KEYS: tuple[str, ...] = (
 )
 
 
-def _find_parent_cad_num(oks: CadastralObject) -> str | None:
-    """Явная связь ОКС → участок из attrs (options / properties.options)."""
+def _find_parent_cad_nums(oks: CadastralObject) -> list[str]:
+    """Явная связь ОКС → участок(и) из attrs.
+
+    Приоритет (по порядку добавления в результат):
+      0) related_cad_nums — заполняет RobustCadastreClient.fetch_related_parcels
+         (pynspd tab_land_links, "related" из ТЗ T9);
+      1) parent_cad_num / parcel_cad_num / land_record_cad_num /
+         parent_land_record_cad_num в attrs.options и properties.options.
+    """
     attrs: dict[str, Any] = oks.attrs or {}
+    out: list[str] = []
+
+    def _push(v: Any) -> None:
+        if isinstance(v, str) and v.strip() and v.strip() not in out:
+            out.append(v.strip())
+
+    related = attrs.get("related_cad_nums")
+    if isinstance(related, (list, tuple)):
+        for v in related:
+            _push(v)
+
     options = attrs.get("options") or {}
     properties = attrs.get("properties") or {}
     inner_options = properties.get("options") or {}
-
     for source in (options, inner_options):
         for key in _PARENT_CAD_NUM_KEYS:
-            value = source.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
+            _push(source.get(key))
+    return out
 
 
 def find_parcel_by_point(
@@ -106,12 +121,14 @@ def oks_effective_geometry(
     if oks.has_contour and oks.geometry is not None and not oks.geometry.is_empty:
         return oks.geometry, False
 
-    # 2) Явная связь (attrs.parent_cad_num и т.п.) — самый дешёвый путь.
-    parent_cad = _find_parent_cad_num(oks)
-    if parent_cad is not None and parent_cad in parcels:
-        parcel = parcels[parent_cad]
-        if parcel.geometry is not None and not parcel.geometry.is_empty:
-            return parcel.geometry, True
+    # 2) Явная связь (related_cad_nums / parent_cad_num / ...) — приоритет
+    #    над spatial. Перебираем все кадастровые номера, берём первый
+    #    известный участок с геометрией.
+    for parent_cad in _find_parent_cad_nums(oks):
+        if parent_cad in parcels:
+            parcel = parcels[parent_cad]
+            if parcel.geometry is not None and not parcel.geometry.is_empty:
+                return parcel.geometry, True
 
     # 3) Spatial fallback: ОКС без контура с привязкой к точке.
     wkt = (oks.attrs or {}).get("attachment_point_wkt")
