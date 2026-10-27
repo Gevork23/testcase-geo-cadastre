@@ -544,12 +544,30 @@ class NspdRequestAdapter:
         return list(results.values())
 
     async def fetch_related_parcels(self, cad_num: str) -> list[str]:
-        """T9.4 fallback: nspd-request 2.0.2 не даёт публичный related API."""
-        log.warning(
-            "related_not_available_source",
-            extra={"cad_num": cad_num, "source": "nspd_request"},
-        )
-        return []
+        """T9.6: real fallback через nspd-request get_related_objects.
+
+        Проверено 2026-10-27: get_land_plots_by_oks / get_oks_by_land_plot
+        в 2.0.2 возвращают None; get_related_objects отдаёт dict с полем
+        "related": ["<parcel cad_num>", ...] — это аналог tab_land_links.
+        """
+        if not self._ok:
+            return []
+        try:
+            payload = await asyncio.to_thread(
+                self.api.get_related_objects, cad_num,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "nspd_request_related_failed",
+                extra={"cad_num": cad_num, "err": type(e).__name__},
+            )
+            return []
+        if not isinstance(payload, dict):
+            return []
+        related = payload.get("related")
+        if not isinstance(related, list):
+            return []
+        return [x for x in related if isinstance(x, str) and x.strip()]
 
     async def _fetch_by_point(
         self, lon: float, lat: float, layer: str | None

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 import shapely
 from shapely.geometry.base import BaseGeometry
@@ -23,7 +23,9 @@ from shapely.geometry.base import BaseGeometry
 from src.nspd_models import CadastralObject
 
 __all__ = [
+    "EffectiveGeometry",
     "find_parcel_by_point",
+    "is_detection_unregistered",
     "iter_oks_without_contour",
     "oks_effective_geometry",
 ]
@@ -96,10 +98,23 @@ def iter_oks_without_contour(
             yield oks
 
 
+class EffectiveGeometry(NamedTuple):
+    """Результат oks_effective_geometry — соответствует README T9.
+
+    README: "...геометрию связанного участка (с флагом inherited_from_parcel=True)".
+
+    NamedTuple: работает и как кортеж (geom, inherited = ...), и как объект
+    с атрибутами (result.inherited_from_parcel).
+    """
+
+    geometry: BaseGeometry | None
+    inherited_from_parcel: bool
+
+
 def oks_effective_geometry(
     oks: CadastralObject,
     parcels: Mapping[str, CadastralObject],
-) -> tuple[BaseGeometry | None, bool]:
+) -> EffectiveGeometry:
     """Эффективная геометрия ОКС с флагом наследования.
 
     Возвращает (geometry, inherited_from_parcel):
@@ -119,7 +134,7 @@ def oks_effective_geometry(
     """
     # 1) Свой контур — приоритет. has_contour=True гарантирует Polygon/MultiPolygon.
     if oks.has_contour and oks.geometry is not None and not oks.geometry.is_empty:
-        return oks.geometry, False
+        return EffectiveGeometry(oks.geometry, False)
 
     # 2) Явная связь (related_cad_nums / parent_cad_num / ...) — приоритет
     #    над spatial. Перебираем все кадастровые номера, берём первый
@@ -128,7 +143,7 @@ def oks_effective_geometry(
         if parent_cad in parcels:
             parcel = parcels[parent_cad]
             if parcel.geometry is not None and not parcel.geometry.is_empty:
-                return parcel.geometry, True
+                return EffectiveGeometry(parcel.geometry, True)
 
     # 3) Spatial fallback: ОКС без контура с привязкой к точке.
     wkt = (oks.attrs or {}).get("attachment_point_wkt")
@@ -141,11 +156,52 @@ def oks_effective_geometry(
             parcel = find_parcel_by_point(point, parcels)
             if parcel is not None and parcel.geometry is not None \
                     and not parcel.geometry.is_empty:
-                return parcel.geometry, True
+                return EffectiveGeometry(parcel.geometry, True)
 
     # 4) Геометрия есть, но has_contour=False (аномалия схемы) — доверяем
     #    геометрии, но помечаем как inherited=False: это не наследование.
     if oks.geometry is not None and not oks.geometry.is_empty:
-        return oks.geometry, False
+        return EffectiveGeometry(oks.geometry, False)
 
-    return None, False
+    return EffectiveGeometry(None, False)
+
+def is_detection_unregistered(
+    detection_geom: BaseGeometry,
+    oks_list: Iterable[CadastralObject],
+    parcels: Mapping[str, CadastralObject],
+    *,
+    buffer_deg: float = 0.00002,
+) -> tuple[bool, str]:
+    """T9.7: runtime-проверка UNREGISTERED с учётом ОКС без контура.
+
+    README T9: "При классификации UNREGISTERED детекция внутри такого участка
+    не должна флагуться как незарегистрированная."
+
+    Логика:
+      1. Для каждого ОКС вычисляем эффективную геометрию (свой контур ИЛИ
+         геометрия родительского участка с inherited_from_parcel=True).
+      2. Если detection (с буфером) пересекает любую эффективную геометрию —
+         ОКС учтён → НЕ UNREGISTERED.
+      3. Иначе — UNREGISTERED.
+
+    buffer_deg — допуск сдвига снимка в градусах (2e-5 ≈ 2 м на широте 47°).
+    Для более точного допуска T20/T22 может передать точное значение из
+    matching.* config + расчёт через UTM. Здесь дефолт — безопасный.
+
+    Returns:
+        (is_unregistered, reason):
+          - (False, "matches_oks:<cad_num>")            — пересекает свой контур;
+          - (False, "inside_parcel_with_inherited:<cad>") — внутри участка с ОКС без контура;
+          - (True,  "no_matching_oks")                  — нет совпадений → UNREGISTERED.
+    """
+    det_buffered = detection_geom.buffer(buffer_deg) if buffer_deg > 0 else detection_geom
+    for oks in oks_list:
+        eff = oks_effective_geometry(oks, parcels)
+        if eff.geometry is None or eff.geometry.is_empty:
+            continue
+        if not eff.geometry.intersects(det_buffered):
+            continue
+        if eff.inherited_from_parcel:
+            return False, f"inside_parcel_with_inherited:{oks.cad_num}"
+        return False, f"matches_oks:{oks.cad_num}"
+    return True, "no_matching_oks"

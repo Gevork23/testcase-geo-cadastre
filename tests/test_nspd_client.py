@@ -625,6 +625,81 @@ def test_cascade_fallback_fails(tmp_path):
 
 
 # ============================================================
+# 9b. T9.8: fetch_related_parcels (related из README T9)
+# ============================================================
+def test_pynspd_adapter_fetch_related_parcels_ok():
+    async def _run():
+        fake = MagicMock()
+        feat = _StubFeat(
+            geometry=_StubGeom(_poly()),
+            properties=_StubProps(
+                _StubOptions(cad_num="61:44:0060958:173"), category=36369
+            ),
+        )
+        fake.find = AsyncMock(return_value=feat)
+        fake.tab_land_links = AsyncMock(return_value=["61:44:0060958:9"])
+
+        adapter = PynspdAdapter(fake)
+        result = await adapter.fetch_related_parcels("61:44:0060958:173")
+        assert result == ["61:44:0060958:9"]
+        fake.tab_land_links.assert_awaited_once_with(feat)
+
+    asyncio.run(_run())
+
+
+def test_pynspd_adapter_fetch_related_parcels_not_found():
+    async def _run():
+        fake = MagicMock()
+        fake.find = AsyncMock(return_value=None)
+        adapter = PynspdAdapter(fake)
+        assert await adapter.fetch_related_parcels("x:y:z:1") == []
+
+    asyncio.run(_run())
+
+
+def test_nspd_request_adapter_fetch_related_parcels(monkeypatch):
+    fake_api = MagicMock()
+    fake_api.get_related_objects.return_value = {
+        "related": ["61:44:0060958:9"],
+        "type": "Здание",
+        "error": None,
+    }
+    fake_module = MagicMock()
+    fake_module.NSPD.return_value = fake_api
+    monkeypatch.setitem(sys.modules, "nspd_request", fake_module)
+
+    adapter = NspdRequestAdapter()
+    assert adapter._ok is True
+    result = asyncio.run(adapter.fetch_related_parcels("61:44:0060958:173"))
+    assert result == ["61:44:0060958:9"]
+
+    # not installed → []
+    adapter._ok = False
+    assert asyncio.run(adapter.fetch_related_parcels("x")) == []
+
+
+def test_robust_client_fetch_related_parcels_cascade(tmp_path):
+    async def _run():
+        primary_fake = AsyncMock()
+        primary_fake.find = AsyncMock(side_effect=RuntimeError("primary down"))
+
+        fallback = AsyncMock()
+        fallback.fetch_related_parcels = AsyncMock(return_value=["61:44:9:9"])
+
+        client = RobustCadastreClient(
+            primary=PynspdAdapter(primary_fake), fallback=fallback,
+            cache=FileCache(tmp_path),
+            max_retries=1, retry_backoff_sec=0.01, retry_backoff_min_sec=0.02,
+            rate_limit_rps=100,
+        )
+        result = await client.fetch_related_parcels("61:44:0060958:173")
+        assert result == ["61:44:9:9"]
+        assert fallback.fetch_related_parcels.await_count == 1
+
+    asyncio.run(_run())
+
+
+# ============================================================
 # 10. Live
 # ============================================================
 @pytest.mark.skipif(
