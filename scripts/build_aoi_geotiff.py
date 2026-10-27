@@ -101,9 +101,9 @@ def build_mosaic_3857(cache_root, x0, y0, x1, y1, z, dst_path):
         for ty in range(y0, y1 + 1):
             for tx in range(x0, x1 + 1):
                 tile_path = cache_root / str(tx) / f"{ty}.jpg"
-                win = Window(
-                    (tx - x0) * TILE_PX, (ty - y0) * TILE_PX, TILE_PX, TILE_PX
-                )
+                # rasterio-stubs declares Window.__init__ with no args (broken stubs);
+                # runtime signature is Window(col_off, row_off, width, height).
+                win = Window((tx - x0) * TILE_PX, (ty - y0) * TILE_PX, TILE_PX, TILE_PX)  # type: ignore[call-arg]
                 blank = np.zeros((3, TILE_PX, TILE_PX), dtype=np.uint8)
                 if not tile_path.exists():
                     LOG.warning("missing tile z=%d x=%d y=%d; filling 0", z, tx, ty)
