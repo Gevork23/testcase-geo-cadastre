@@ -464,12 +464,16 @@ class NspdRequestAdapter:
     """
 
     def __init__(
-        self, grid_step_m: float = 100.0, max_points: int = 500
+        self,
+        grid_step_m: float = 100.0,
+        max_points: int = 500,
+        timeout_s: float = 30.0,
     ) -> None:
+        self.timeout_s = float(timeout_s)
         try:
             from nspd_request import NSPD
 
-            self.api = NSPD(timeout=30)
+            self.api = NSPD(timeout=self.timeout_s)
             self._ok = True
         except ImportError:
             self._ok = False
@@ -696,6 +700,7 @@ class RobustCadastreClient:
         max_retries: int = 3,
         retry_backoff_sec: float = 1.0,
         retry_backoff_min_sec: float = 2.0,
+        retry_backoff_max_sec: float = 30.0,
         rate_limit_rps: float = 1.5,
         cache_policy: CachePolicy = CachePolicy.USE,
     ) -> None:
@@ -705,6 +710,7 @@ class RobustCadastreClient:
         self.max_retries = max_retries
         self.backoff = retry_backoff_sec
         self.backoff_min = retry_backoff_min_sec
+        self.backoff_max = retry_backoff_max_sec
         self._limiter = AsyncLimiter(rate_limit_rps, 1)  # общий на процесс
         self.cache_policy = cache_policy
         self.stats: dict[str, int] = {
@@ -749,7 +755,7 @@ class RobustCadastreClient:
         async for attempt in AsyncRetrying(
             retry=retry_if_exception(_is_retryable),
             wait=wait_exponential(
-                multiplier=self.backoff, min=self.backoff_min, max=30
+                multiplier=self.backoff, min=self.backoff_min, max=self.backoff_max
             ),
             stop=stop_after_attempt(self.max_retries),
             reraise=True,
@@ -970,6 +976,7 @@ async def _main_test(  # pragma: no cover
         fallback = NspdRequestAdapter(
             grid_step_m=float(n.get("fallback_grid_step_m", 100.0)),
             max_points=int(n.get("fallback_max_points", 500)),
+            timeout_s=float(n.get("timeout_s", 30.0)),
         )
         client = RobustCadastreClient(
             primary=primary,
@@ -978,6 +985,7 @@ async def _main_test(  # pragma: no cover
             max_retries=int(n.get("max_retries", 3)),
             retry_backoff_sec=float(n.get("retry_backoff_sec", 1.0)),
             retry_backoff_min_sec=float(n.get("retry_backoff_min_sec", 2.0)),
+            retry_backoff_max_sec=float(n.get("retry_backoff_max_sec", 30.0)),
             rate_limit_rps=float(n.get("rate_limit_rps", 1.5)),
             cache_policy=cache_policy,
         )

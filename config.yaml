@@ -27,6 +27,8 @@ nspd:
   cache_ttl_days: 7
   max_retries: 3
   retry_backoff_min_sec: 2.0
+  retry_backoff_max_sec: 30.0     # NEW — верхняя граница экспоненциального backoff
+  timeout_s: 30.0                  # NEW — per-request HTTP timeout
   rate_limit_rps: 1.5
   layers:          # алиасы, адаптер сам разворачивает в русские title
     - land_record
