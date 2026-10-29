@@ -25,14 +25,23 @@ LOG = logging.getLogger("build_geotiff")
 TILE_PX = 256
 EARTH_CIRCUM_M = 40075016.68557849
 WEBMERC_HALF = EARTH_CIRCUM_M / 2.0
+IMAGERY_DATE = "2022-10-07"  # Wayback release date for AOI Koysug
+IMAGERY_DATE_SOURCE = (
+    "https://metadata.maptiles.arcgis.com/arcgis/rest/services/"
+    "World_Imagery_Metadata_2024_r06/MapServer/8/query"
+    "?f=json&where=1%3D1&outFields=SRC_DATE2&returnGeometry=false"
+    "&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects"
+    "&geometry={\"x\":4426000,\"y\":5970000,\"spatialReference\":{\"wkid\":3857}}"
+)
 ATTRIBUTION = (
     "Imagery source: Esri World Imagery. "
     "Attribution: Esri, Maxar, Earthstar Geographics, and the GIS User Community. "
     "Access: XYZ tiles from server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer. "
     "Usage: research/educational, no redistribution. "
-    "Imagery date: see DECISIONS.md T11 (checked via World Imagery Wayback). "
+    f"Imagery date: {IMAGERY_DATE} (checked 2026-10-29 via World Imagery Wayback / ArcGIS Metadata API). "
     "Processed by CadastreCheck (T10)."
 )
+
 
 
 def load_config(path: str) -> dict:
