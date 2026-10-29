@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import cast
 
 # Запуск как `python scripts/dump_nspd_aoi.py`: sys.path[0] = scripts/,
 # корень репозитория туда не попадает — добавляем вручную, чтобы `import src` работал.
@@ -33,6 +34,7 @@ from shapely.wkt import loads as wkt_loads
 
 from src.nspd_cache import FileCache
 from src.nspd_client import (
+    AOI,
     CachePolicy,
     PynspdAdapter,
     RobustCadastreClient,
@@ -141,7 +143,7 @@ async def run(
 
         collected: list[CadastralObject] = []
         for ln in layers:
-            objs = await client.get_features(aoi, layer=ln)
+            objs = await client.get_features(cast(AOI, aoi), layer=ln)
             collected.extend(objs)
             log.info("layer_done layer=%s count=%d", ln, len(objs))
 

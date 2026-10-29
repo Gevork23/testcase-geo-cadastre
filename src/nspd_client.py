@@ -473,7 +473,7 @@ class NspdRequestAdapter:
         try:
             from nspd_request import NSPD
 
-            self.api = NSPD(timeout=self.timeout_s)
+            self.api = NSPD(timeout=int(self.timeout_s))
             self._ok = True
         except ImportError:
             self._ok = False
@@ -918,9 +918,10 @@ class RobustCadastreClient:
             return result
         if self.fallback is None:
             return result
+        fallback = self.fallback  # local binding for Pylance narrowing through lambda
         try:
             fb = await self._rate_limited(
-                lambda: self.fallback.fetch_related_parcels(cad_num)
+                lambda: fallback.fetch_related_parcels(cad_num)
             )
             return fb
         except Exception as e:  # noqa: BLE001
@@ -959,8 +960,8 @@ async def _main_test(  # pragma: no cover
     # Windows: stdout по умолчанию cp1251, а в логах есть "->".
     # Принудительно utf-8, чтобы print не падал с UnicodeEncodeError.
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         pass
     import yaml
