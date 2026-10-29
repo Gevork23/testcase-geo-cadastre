@@ -2,8 +2,16 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import cast
+
+# Windows Git Bash + pipe (| tail) переключает stdout в cp1251, а в выводе есть `²`
+# (из `km²`). Принудительно utf-8, иначе UnicodeEncodeError.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+except (AttributeError, OSError):
+    pass
 
 import geopandas as gpd
 import rasterio
