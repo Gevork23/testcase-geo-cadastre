@@ -960,3 +960,23 @@ T20 может передать точное значение из matching.* co
 
 ```bash
 uv run python -c "import rasterio; s=rasterio.open('data/imagery/aoi_esri_utm37n.tif'); print(s.crs, s.res, s.bounds, s.shape, s.nodata, list(s.tags()))"
+
+```
+
+## §T11 — Атрибуция ESRI и дата снимка
+
+**Дата съёмки:** 2022-10-07 (timestamp 1665100800000).
+**Источник:** ArcGIS REST Metadata API для World Imagery Wayback (эквивалент ручной проверки в [Wayback](https://livingatlas.arcgis.com/wayback/)).
+**Проверено:** 2026-10-29.
+
+**Атрибуция (обязательна при использовании):**
+> Esri, Maxar, Earthstar Geographics, and the GIS User Community
+
+**Где зафиксирована:**
+- TIFF-теги `data/imagery/aoi_esri_utm37n.tif`: `TIFFTAG_IMAGEDESCRIPTION`, `ATTRIBUTION` — с датой.
+- Sidecar `data/imagery/aoi_esri_utm37n.attribution.txt` — с датой.
+- `ATTRIBUTION.md` в корне репозитория.
+- Streamlit — будет учтено в T27.
+
+**Свежесть снимка (интерпретация UNREGISTERED):**
+Снимок от 2022-10-07 **старше 2–3 лет**. Это прямое ограничение: здания, снесённые или построенные после этой даты, не будут корректно распознаны. Флаги `UNREGISTERED` могут содержать ложные срабатывания на объектах, которые уже снесены, или пропускать новые постройки. Это ограничение необходимо явно указать в итоговом отчёте и учитывать при оценке precision.
